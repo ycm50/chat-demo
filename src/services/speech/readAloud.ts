@@ -92,14 +92,16 @@ export const toggleReadAloud = (
   current = { controller, context }
   useReadAloud.setState({ messageId, status: 'loading' })
   // 音色在开始朗读时读取，设置中切换后下一次朗读生效
-  const { apiKey, ttsVoice } = useSettings.getState()
+  const { apiKeys, ttsVoice } = useSettings.getState()
+  // 语音固定走 DeepSeek 的接口，与当前对话服务商无关
+  const apiKey = apiKeys.deepseek ?? ''
 
   void (async () => {
     let nextTime = 0
     let lastSource: AudioBufferSourceNode | null = null
     let rest = new Uint8Array(0)
     try {
-      const stream = await synthesize(apiKey ?? '', text, ttsVoice, controller.signal)
+      const stream = await synthesize(apiKey, text, ttsVoice, controller.signal)
       const reader = stream.getReader()
       controller.signal.addEventListener('abort', () => void reader.cancel().catch(() => {}))
       for (;;) {

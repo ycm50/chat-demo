@@ -70,6 +70,33 @@ src/
   utils/               Shared utilities
 ```
 
+## Providers
+
+Chat can run against DeepSeek or any OpenAI-compatible provider. Pick the provider in Settings → Data, and enter its API key there. Available providers:
+
+| Provider      | Protocol           | Chat endpoint                                  | Model list                              |
+| ------------- | ------------------ | ---------------------------------------------- | --------------------------------------- |
+| DeepSeek      | Anthropic Messages | `__API_ORIGIN__/anthropic/v1`                  | `__API_ORIGIN__/models`                 |
+| OpenCode Go   | chat/completions   | `https://opencode.ai/inference/go/openai/v1`   | `https://opencode.ai/zen/go/v1/models`  |
+| OpenCode Zen  | chat/completions   | `https://opencode.ai/inference/openai/v1`      | `https://opencode.ai/zen/v1/models`     |
+| OpenDesign    | chat/completions   | `https://amr-link.open-design.ai/v1`           | the same base + `/models`               |
+
+Note that OpenCode's model list and chat endpoints live under different paths — the catalog in `/zen/*/v1/models` reports the real chat base URL per model, and OpenCode Go additionally requires a stable `x-opencode-session` header per conversation.
+
+### Cross-origin access
+
+DeepSeek sends complete CORS headers, so it works from a static page. OpenCode and OpenDesign do not return CORS headers on their auth-error responses, which makes any failed key check look like a network error in the browser. `pnpm dev` therefore proxies those providers through same-origin paths (`/provider/*`); the production build contains no proxy and needs a reverse proxy of your own in front of it for those providers. When a request is blocked by CORS, the app now says so explicitly instead of reporting a network failure.
+
+OpenAI-compatible streams are translated into the same internal event stream as the Anthropic one, so thinking, streaming text, stop reasons, and usage all render identically. Model lists are fetched from each provider's `GET /models` after the key is verified.
+
+Capabilities that only exist on DeepSeek are routed through the **DeepSeek key**, which is why it is requested separately even when another provider handles the chat:
+
+- **Attachments**: uploaded through the DeepSeek Files API. For OpenAI-compatible providers the local originals are inlined into the request instead — images as `image_url` data URLs and text-like files as `<file>` blocks. PDF, Word, and other binary documents cannot be inlined and are left out of the request, with a notice.
+- **Web search**: DeepSeek uses its server-side search tool. For OpenAI-compatible providers a preflight DeepSeek request performs the search, and its digest is injected as a system message. Without a DeepSeek key the search toggle is disabled.
+- **Speech**: ASR and TTS always use the DeepSeek endpoints, so voice input and read-aloud need the DeepSeek key as well.
+
+Without a DeepSeek key, an OpenAI-compatible provider still supports plain chat, thinking, history, and regeneration; only the capabilities above are unavailable.
+
 ## License
 
 [MIT](LICENSE). The build copies the license to `dist/LICENSE`; include it when distributing the app. Third-party dependencies are subject to their own licenses.

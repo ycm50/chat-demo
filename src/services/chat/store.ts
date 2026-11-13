@@ -1,10 +1,23 @@
 import { create } from 'zustand'
 import { createId } from '../../utils/id.js'
-import { ApiError, streamMessage } from '../api/client.js'
-import type { ChatModel, CreateMessageRequest } from '../api/types.js'
+import { ApiError, streamMessage, streamOpenAiChat } from '../api/client.js'
+import { getProvider } from '../api/providers.js'
+import type {
+  ChatModel,
+  CreateMessageRequest,
+  MessageStreamEvent,
+} from '../api/types.js'
+import { replyPrefixText, toOpenAiMessages, type InlineAttachment } from '../api/toOpenAi.js'
+import { digestWebSearch } from '../api/webSearch.js'
 import { extractFileIds, getFileErrorCode, isRetryableApiError } from '../api/errors.js'
 import { cancelUpload, describeUploadError, uploadAttachment, useUploads } from '../attachments.js'
-import { useSettings } from '../settings.js'
+import {
+  getCurrentApiKey,
+  getCurrentModel,
+  getDeepseekApiKey,
+  useSettings,
+} from '../settings.js'
+import { describeSkippedNames, inlineAttachments, notifyInlineNotice } from './inlineAttachments.js'
 import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
 import * as db from './db.js'
 import {
@@ -32,7 +45,7 @@ import {
   type UserMessage,
 } from './types.js'
 
-/** deepseek-flash 同时支持深度思考与图片输入 */
+/** 未指定模型时使用 DeepSeek 的默认模型（deepseek-flash 同时支持深度思考与图片输入） */
 const MODEL: ChatModel = 'deepseek-flash'
 /** 所有生成请求统一携带的助手身份说明 */
 const SYSTEM_PROMPT = '该助手为DeepSeek，由深度求索公司创造。'
@@ -260,7 +273,8 @@ const createReply = (): AssistantMessage => {
     id: createId(),
     role: 'assistant',
     createdAt: Date.now(),
-    model: MODEL,
+    // 记录创建时的模型：会话切到另一家服务商后，重新生成仍沿用本轮的选择
+    model: getCurrentModel(),
     thinking,
     search,
     prefix: true,
@@ -709,7 +723,7 @@ export const continueReply = (sessionId: string, messageId: string) => {
   const reply: AssistantMessage = {
     ...previous,
     // 未记录请求配置的回复，续写时使用默认模型和当前开关。
-    model: previous.model ?? MODEL,
+    model: previous.model ?? getCurrentModel(),
     thinking: previous.thinking ?? thinking,
     search: previous.search ?? search,
     status: 'pending',
@@ -818,7 +832,8 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
   // 服务端判定 file_id 失效时会清掉会话里的 serverId，先用最新消息替换请求快照，
   // 否则快照里仍是旧 id，补传会直接复用它。
   request = refreshRequest(sessionId, request)
-  const apiKey = useSettings.getState().apiKey ?? ''
+  // 附件上传固定走 DeepSeek 的 Files API，与当前对话服务商无关
+  const apiKey = getDeepseekApiKey()
   const serverIds = new Map<string, string>()
   // 停止生成立即生效；上传本身不取消（输入框与其他消息可能共用同一任务），完成后照常写回 serverId
   const aborted = new Promise<never>((_, reject) => {
@@ -955,6 +970,73 @@ const waitForRetry = (attempt: number, signal: AbortSignal) =>
   })
 
 /**
+ * 非 DeepSeek 服务商的联网检索：用 DeepSeek Key 预检一次，返回可注入上下文的摘编。
+ * 没有 DeepSeek Key 或检索失败时返回空串，主请求照常发出。
+ */
+const runSearchDigest = async (prepared: Request, signal: AbortSignal): Promise<string> => {
+  const apiKey = getDeepseekApiKey()
+  if (!apiKey) {
+    return ''
+  }
+  const question = prepared.question.content.trim()
+  if (!question) {
+    return ''
+  }
+  try {
+    const digest = await digestWebSearch(apiKey, question, MODEL, signal)
+    return digest.text
+  } catch {
+    // 检索失败不阻断回答，只是没有搜索上下文
+    return ''
+  }
+}
+
+/**
+ * 非 DeepSeek 服务商的附件：直接读本地原件内联。
+ * 历史轮次里的二进制文档会被跳过，本轮提问中的文档按未进入请求处理。
+ */
+const resolveInlineAttachments = async (
+  prepared: Request,
+  signal: AbortSignal
+): Promise<{ groups: InlineAttachment[][]; skipped: string[] }> => {
+  const groups: InlineAttachment[][] = []
+  const skipped: string[] = []
+  const inline = async (files: FileAttachment[]): Promise<InlineAttachment[]> => {
+    if (files.length === 0) {
+      return []
+    }
+    signal.throwIfAborted()
+    const result = await inlineAttachments(files)
+    skipped.push(...result.skipped.map((item) => item.name))
+    return result.inline
+  }
+  for (const [user] of getContextRounds(prepared.history)) {
+    groups.push(await inline(user.files))
+  }
+  groups.push(await inline(prepared.question.files))
+  return { groups, skipped }
+}
+
+/** 无法内联的附件（PDF、Word 等）交给界面层提示，服务层不直接弹 toast */
+const showSkippedAttachments = (names: string[]) => notifyInlineNotice(describeSkippedNames(names))
+
+/**
+ * OpenAI 兼容服务没有服务端标题生成，用本地截取的首句作为会话标题。
+ * 与 DeepSeek 一致：已有标题时不覆盖。
+ */
+const applyLocalTitle = (sessionId: string, controller: AbortController, question: string) => {
+  if (!titleRequests.has(controller)) {
+    return
+  }
+  titleRequests.delete(controller)
+  const title = question.replace(/\s+/g, ' ').trim().slice(0, 30)
+  if (!title) {
+    return
+  }
+  updateSession(sessionId, (session) => (session.title ? session : { ...session, title }))
+}
+
+/**
  * 请求并消费流：先补齐附件的 serverId，再发请求；流式增量按动画帧刷新内存，完成、失败或停止后落盘。
  * 补传失败时回复记为 upload 错误，可重试。
  * 服务端判定 file_id 失效时重新补传后重发，退避重试且次数有上限，超过则按原始报错收尾。
@@ -996,19 +1078,50 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           initial.thinking ?? false,
           latestReminder
         )
-        const events = streamMessage(
-          useSettings.getState().apiKey ?? '',
-          {
-            model: initial.model ?? MODEL,
-            system: SYSTEM_PROMPT,
-            messages,
-            thinking: { type: initial.thinking ? 'enabled' : 'disabled' },
-            safety_check: SAFETY_CHECK,
-            tools: serverTools(initial.search ?? false),
-            ...(titleRequests.has(controller) ? { title: { enabled: true } } : {}),
-          },
-          controller.signal
-        )
+        const provider = getProvider(useSettings.getState().provider)
+        const model = initial.model ?? getCurrentModel()
+        // 非 DeepSeek 服务商走 OpenAI 兼容协议：附件内联，搜索先用 DeepSeek 预检再注入
+        let events: AsyncGenerator<MessageStreamEvent>
+        if (provider.protocol === 'openai') {
+          const searchDigest = (initial.search ?? false)
+            ? await runSearchDigest(prepared, controller.signal)
+            : ''
+          const inline = await resolveInlineAttachments(prepared, controller.signal)
+          if (inline.skipped.length > 0) {
+            // 无法内联的文档不进请求，明确告诉用户，避免误以为模型读到了内容
+            showSkippedAttachments(inline.skipped)
+          }
+          const openaiMessages = toOpenAiMessages(SYSTEM_PROMPT, messages, inline.groups, {
+            prefixText: prepared.prefix ? replyPrefixText(prepared.prefix.blocks) : '',
+            searchDigest,
+          })
+          events = streamOpenAiChat(
+            provider,
+            getCurrentApiKey(),
+            { model, messages: openaiMessages, stream: true },
+            controller.signal,
+            // 同一个会话固定用同一个 session id，便于上游做路由与提示缓存
+            sessionId
+          )
+        } else {
+          events = streamMessage(
+            getCurrentApiKey() || getDeepseekApiKey(),
+            {
+              model,
+              system: SYSTEM_PROMPT,
+              messages,
+              thinking: { type: initial.thinking ? 'enabled' : 'disabled' },
+              safety_check: SAFETY_CHECK,
+              tools: serverTools(initial.search ?? false),
+              ...(titleRequests.has(controller) ? { title: { enabled: true } } : {}),
+            },
+            controller.signal
+          )
+        }
+        if (provider.protocol === 'openai') {
+          // OpenAI 兼容服务不返回标题，用本轮提问本地生成
+          applyLocalTitle(sessionId, controller, prepared.question.content)
+        }
         const blockIndexes = new Map<number, number>()
         for await (const event of events) {
           receivedContent ||= event.type === 'content_block_start'

@@ -11,6 +11,8 @@ export type ApiErrorCondition =
   | 'rateLimited'
   | 'serverBusy'
   | 'network'
+  /** 服务可达但浏览器被 CORS 拦下，与网络不通区分开 */
+  | 'cors'
   | 'other'
 
 /** 按 HTTP 状态码归类；没有状态码（请求没到达服务端）时按网络问题处理 */
@@ -36,6 +38,9 @@ export const classifyStatus = (status: number | undefined): ApiErrorCondition =>
 export const classifyApiError = (error: unknown): ApiErrorCondition => {
   if (!(error instanceof ApiError)) {
     return 'other'
+  }
+  if (error.kind === 'cors') {
+    return 'cors'
   }
   if (error.status === undefined) {
     return error.kind === 'network' ? 'network' : 'other'

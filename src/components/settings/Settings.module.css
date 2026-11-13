@@ -211,6 +211,26 @@
   padding-bottom: 4px;
 }
 
+/** 服务商与模型配置：与 API Key 区一致的纵向布局 */
+.provider {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
+.providerSelect {
+  align-self: flex-start;
+}
+
+.modelRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--ds-control-height-m);
+}
+
 .apiKeySaved,
 .apiKeyInput {
   display: flex;

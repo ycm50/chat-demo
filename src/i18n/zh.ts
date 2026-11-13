@@ -103,6 +103,9 @@ export const zh = {
   apiKeyPlaceholder: '请输入 API Key',
   apiKeyVerifying: '正在验证...',
   confirm: '确定',
+  apiKeyCorsBlocked:
+    '服务已连通，但响应缺少跨域（CORS）头，浏览器拒绝读取结果。开发时请用 pnpm dev 的本地代理访问；部署为静态站点时需要自建反向代理。',
+  replyCorsBlocked: '该服务未开放跨域访问，请通过本地开发服务器或自建反向代理后重试',
   apiKeyInvalid: 'API Key 无效，请检查后重试',
   apiKeyVerificationFailed: '校验失败：{message}',
   historyImport: '导入历史对话',
@@ -113,7 +116,7 @@ export const zh = {
   historyImportedOne: '已导入 1 个对话',
   historyImported: '已导入 {count} 个对话',
   historyImportFailed:
-    '文件导入失败，可能是文件格式不正确或文件已损坏。请前往 DeepSeek 导出历史对话文件后重新导入。',
+    '文件导入失败，可能是文件格式错误或使用了旧版的对话导出 ZIP 文件，请前往 DeepSeek 重新导出历史对话文件后再次导入。',
   historyExportFailed: '导出失败：{message}',
   exportAllLabel: '导出所有历史对话',
   historyExportDescription:
@@ -167,6 +170,17 @@ export const zh = {
   ttsFailed: '朗读失败，请稍后再试',
   retry: '重试',
   latestReminderLanguage: '中文',
+  chatInputSearchNeedsDeepseekKey: '联网搜索需要 DeepSeek Key',
+  chatInputAttachmentNeedsDeepseekKey: '附件上传需要 DeepSeek Key',
+  attachmentNotSentForProvider: '这些附件无法随当前服务商发送，已从本轮请求中省略：{names}',
+  settingsProvider: '对话服务商',
+  settingsModel: '对话模型',
+  settingsModelLoading: '正在读取模型...',
+  apiKeyClear: '清除',
+  settingsDeepseekKeyRequired: 'DeepSeek Key 用于附件、语音与联网检索',
+  settingsProviderAttachmentHint:
+    '附件与语音使用上方 DeepSeek Key：图片与文本类文件会内联发送，PDF、Word 等文档暂不进入请求；联网搜索会先用 DeepSeek 检索再注入。',
+  chatInputProviderNoKey: '当前服务商还没有 API Key',
   settingsLocaleZhCN: '简体中文',
   settingsLocaleEnUS: 'English',
 } as const

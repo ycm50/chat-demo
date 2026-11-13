@@ -70,6 +70,33 @@ src/
   utils/               通用工具
 ```
 
+## 服务商
+
+对话可以走 DeepSeek，也可以走任何 OpenAI 兼容服务。在「设置 → 数据管理」里选择服务商并填写各自的 API Key：
+
+| 服务商       | 协议               | 对话接口                                       | 模型清单                                |
+| ------------ | ------------------ | ---------------------------------------------- | --------------------------------------- |
+| DeepSeek     | Anthropic Messages | `__API_ORIGIN__/anthropic/v1`                  | `__API_ORIGIN__/models`                 |
+| OpenCode Go  | chat/completions   | `https://opencode.ai/inference/go/openai/v1`   | `https://opencode.ai/zen/go/v1/models`  |
+| OpenCode Zen | chat/completions   | `https://opencode.ai/inference/openai/v1`      | `https://opencode.ai/zen/v1/models`     |
+| OpenDesign   | chat/completions   | `https://amr-link.open-design.ai/v1`           | 同上再加 `/models`                      |
+
+注意 OpenCode 的模型清单与对话接口不在同一路径：`/zen/*/v1/models` 里每条模型都写明了真实的对话 base URL；OpenCode Go 还要求每个会话带稳定的 `x-opencode-session` 请求头，缺失会被 400 拒绝。
+
+### 跨域访问
+
+DeepSeek 的 CORS 响应完整，静态页面可以直连。OpenCode 与 OpenDesign 在鉴权失败时不返回 CORS 头，浏览器里会把「Key 校验失败」显示成网络错误。因此 `pnpm dev` 会把这两家的请求走同源代理（`/provider/*`）；生产构建不含代理，部署为静态站点时需要自建反向代理。确实被 CORS 拦下时，应用会明确提示跨域问题，而不再报成网络异常。
+
+OpenAI 兼容的流式响应会被翻译成与 Anthropic 相同的一套内部事件，思考、正文增量、结束原因和用量都按原有方式渲染。Key 校验通过后会从各家 `GET /models` 拉取模型清单供选择。
+
+只有 DeepSeek 才有的能力统一走 **DeepSeek Key**，所以即使对话由别的服务商处理，也需要单独配置它：
+
+- **附件**：上传走 DeepSeek 的 Files API。对话由 OpenAI 兼容服务商处理时，发送前改为把本地原件内联进请求——图片转成 `image_url` 的 data URL，文本类文件包成 `<file>` 块；PDF、Word 等二进制文档无法内联，会从请求中省略并提示。
+- **联网搜索**：DeepSeek 使用服务端搜索工具；OpenAI 兼容服务商则先用 DeepSeek 预检检索一次，把摘编作为 system 消息注入。没有 DeepSeek Key 时搜索开关禁用。
+- **语音**：ASR 与 TTS 始终使用 DeepSeek 的接口，因此语音输入与朗读同样需要 DeepSeek Key。
+
+没有 DeepSeek Key 时，OpenAI 兼容服务商仍然支持纯对话、深度思考、历史与重新生成，只是上述能力不可用。
+
 ## 许可证
 
 [MIT](LICENSE)。构建会将许可证复制到 `dist/LICENSE`，分发时请一并保留；第三方依赖遵循各自的许可证。

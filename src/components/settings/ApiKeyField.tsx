@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { IconEditOutline16 } from '../base/icons.js'
-import { useSettings } from '../../services/settings.js'
+import { setProviderApiKey, useSettings } from '../../services/settings.js'
 import { useIsMobile } from '../../app/viewport.js'
 import { IconButton } from '../base/IconButton.js'
 import { useApiKeyForm } from './useApiKeyForm.js'
@@ -9,9 +9,10 @@ import styles from './Settings.module.css'
 
 /** API Key 的编辑状态：输入框与移动端底部的「确定」按钮共用 */
 export const useApiKeyEditor = () => {
-  const apiKey = useSettings((state) => state.apiKey)
+  const apiKey = useSettings((state) => state.apiKeys.deepseek)
   const [editing, setEditing] = useState(false)
-  const form = useApiKeyForm(() => setEditing(false))
+  // 这个输入框始终写 DeepSeek 的 Key：附件、语音与联网检索都只认它
+  const form = useApiKeyForm(() => setEditing(false), (key) => setProviderApiKey('deepseek', key))
   return { apiKey, editing, setEditing, form, showInput: !apiKey || editing }
 }
 
@@ -22,11 +23,15 @@ export const ApiKeyField = ({ editor }: { editor: ApiKeyEditor }) => {
   const t = useTranslate()
   const isMobile = useIsMobile()
   const { apiKey, editing, setEditing, form, showInput } = editor
+  const deepseekKeyMissing = !apiKey
 
   return (
     <div className={styles.cell}>
       <div className={styles.apiKey}>
         <div className={styles.label}>{t('apiKeyStart')}</div>
+        {deepseekKeyMissing ? (
+          <div className={styles.description}>{t('settingsDeepseekKeyRequired')}</div>
+        ) : null}
         {apiKey && !editing ? (
           <div className={styles.apiKeySaved}>
             <span className={styles.apiKeyMask}>{'*'.repeat(apiKey.length)}</span>

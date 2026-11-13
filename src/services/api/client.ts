@@ -1,5 +1,12 @@
 import { translate, type TranslationMessage } from '../../i18n/index.js'
 import { readMessageEvent } from './parseEvent.js'
+import {
+  createOpenAiStreamState,
+  finishOpenAiStream,
+  readOpenAiEvent,
+  type OpenAiStreamState,
+} from './parseOpenAiEvent.js'
+import { DEEPSEEK_ANTHROPIC_BASE_URL, type Provider } from './providers.js'
 import { readServerSentEvents } from './sse.js'
 import type {
   ApiErrorBody,
@@ -12,7 +19,7 @@ import type {
 /** 构建期 API 地址，默认 https://api.deepseek.com；本地开发支持开发服务器代理 */
 export const API_ORIGIN = __API_ORIGIN__
 /** Anthropic 兼容接口的前缀 */
-const ANTHROPIC_BASE_URL = `${API_ORIGIN}/anthropic/v1`
+const ANTHROPIC_BASE_URL = DEEPSEEK_ANTHROPIC_BASE_URL
 /** 引用 Files API 上传的图片、调用 Anthropic 兼容 Files API 时必须携带 */
 const FILES_BETA = 'files-api-2025-04-14'
 
@@ -25,6 +32,8 @@ export type ApiErrorKind =
   | 'network'
   /** 流在 message_stop 之前结束 */
   | 'interrupted'
+  /** 服务可达，但响应缺少 CORS 头，浏览器拒绝把结果交给页面 */
+  | 'cors'
   /** 响应不符合协议（如非 SSE 响应） */
   | 'protocol'
 
@@ -48,6 +57,28 @@ const isErrorBody = (value: unknown): value is ApiErrorBody =>
   'error' in value &&
   typeof (value as ApiErrorBody).error?.message === 'string'
 
+/**
+ * OpenAI 兼容服务的错误体：`{ error: { message } }`，也有网关返回 `{ error: "..." }`
+ * 或 `{ message: "..." }` 的情况。
+ */
+export const readOpenAiErrorMessage = (value: unknown): string | null => {
+  if (typeof value !== 'object' || value === null) {
+    return null
+  }
+  const error = (value as { error?: unknown }).error
+  if (typeof error === 'string') {
+    return error
+  }
+  if (typeof error === 'object' && error !== null) {
+    const message = (error as { message?: unknown }).message
+    if (typeof message === 'string' && message) {
+      return message
+    }
+  }
+  const message = (value as { message?: unknown }).message
+  return typeof message === 'string' && message ? message : null
+}
+
 const readErrorResponse = async (
   response: Response,
   kind: 'http' | 'protocol' = 'http',
@@ -59,6 +90,8 @@ const readErrorResponse = async (
     const body: unknown = JSON.parse(text)
     if (isErrorBody(body)) {
       message = body.error.message
+    } else {
+      message = readOpenAiErrorMessage(body) ?? message
     }
   } catch {
     // 非 JSON 响应体直接展示原文
@@ -66,6 +99,13 @@ const readErrorResponse = async (
   return new ApiError(kind, message, response.status)
 }
 
+/**
+ * 发起请求并把失败统一成 ApiError。
+ *
+ * 跨域被拦时浏览器只会抛一个笼统的 TypeError（Failed to fetch），与真正断网无法区分。
+ * 这里改为先试一次 `mode: 'cors'`，失败再用 `mode: 'no-cors'` 探测一次：
+ * 能探到响应说明服务本身可达、只是没给 CORS 头，报 config 让用户看到真正的原因。
+ */
 export const request = async (url: string, init: RequestInit): Promise<Response> => {
   let response: Response
   try {
@@ -73,6 +113,9 @@ export const request = async (url: string, init: RequestInit): Promise<Response>
   } catch (error) {
     if (init.signal?.aborted) {
       throw error
+    }
+    if (await isCorsBlocked(url)) {
+      throw new ApiError('cors', url)
     }
     throw new ApiError('network', error instanceof Error ? error.message : String(error))
   }
@@ -82,6 +125,16 @@ export const request = async (url: string, init: RequestInit): Promise<Response>
   return response
 }
 
+/** no-cors 探测：请求已发出即说明服务可达，跨域被拦是 CORS 问题而不是网络问题 */
+const isCorsBlocked = async (url: string): Promise<boolean> => {
+  try {
+    await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 const anthropicHeaders = (apiKey: string, beta: boolean): Record<string, string> => ({
   // DeepSeek 兼容接口的鉴权方式，也可使用 Authorization: Bearer。
   'x-api-key': apiKey,
@@ -89,12 +142,80 @@ const anthropicHeaders = (apiKey: string, beta: boolean): Record<string, string>
   ...(beta ? { 'anthropic-beta': FILES_BETA } : {}),
 })
 
-/** 用 GET /models 校验 API Key（不产生费用） */
-export const verifyApiKey = async (apiKey: string, signal?: AbortSignal): Promise<void> => {
-  await request(`${API_ORIGIN}/models`, {
+/** 用 GET /models 校验 API Key（不产生费用）；OpenAI 兼容服务同样提供该端点 */
+export const verifyApiKey = async (
+  provider: Provider,
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<void> => {
+  await request(provider.modelsURL, {
     method: 'GET',
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: { Authorization: `Bearer ${apiKey}`, ...provider.headers },
     signal,
+  })
+}
+
+/** 模型清单里的一项：对话请求要用的 id，以及给人看的名称 */
+export type ModelOption = {
+  /** 发请求时使用的模型 id */
+  id: string
+  /** 设置里展示的名称；与 id 相同时由界面直接显示 id */
+  label: string
+}
+
+/**
+ * 拉取服务商的模型清单，供设置里的模型下拉使用。
+ *
+ * 兼容三种常见形状：`{ data: [{ id }] }`、`[{ id }]` 与纯字符串数组。
+ * OpenCode 的清单里 id 与展示名分列在 id / name，且部分模型带 canonical_id；
+ * 只取面向 chat 的条目（type 缺省或为 chat），并把 name 作为展示名。
+ */
+export const listModels = async (
+  provider: Provider,
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<ModelOption[]> => {
+  const response = await request(provider.modelsURL, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${apiKey}`, ...provider.headers },
+    signal,
+  })
+  const body: unknown = await response.json().catch(() => null)
+  const data = Array.isArray(body)
+    ? body
+    : body !== null && typeof body === 'object' && Array.isArray((body as { data?: unknown }).data)
+      ? ((body as { data: unknown[] }).data)
+      : []
+  const options = data.flatMap((item): ModelOption[] => {
+    if (typeof item === 'string') {
+      return [{ id: item, label: item }]
+    }
+    if (item === null || typeof item !== 'object') {
+      return []
+    }
+    const record = item as Record<string, unknown>
+    // 非 chat 的条目（如 embedding）不能用于对话
+    if (typeof record.type === 'string' && record.type !== 'chat') {
+      return []
+    }
+    const key = (['id', 'model', 'name'] as const).find(
+      (candidate) => typeof record[candidate] === 'string' && record[candidate]
+    )
+    if (!key) {
+      return []
+    }
+    const id = String(record[key])
+    const label = typeof record.name === 'string' && record.name ? record.name : id
+    return [{ id, label }]
+  })
+  // 同一 id 只保留第一条
+  const seen = new Set<string>()
+  return options.filter((option) => {
+    if (seen.has(option.id)) {
+      return false
+    }
+    seen.add(option.id)
+    return true
   })
 }
 
@@ -187,3 +308,72 @@ export async function* streamMessage(
   // 服务端没有提供错误内容时保持为空，不推测断流原因。
   throw new ApiError('interrupted', '')
 }
+
+/** OpenAI 兼容 chat/completions 的请求体；参数字段由调用方按需补充 */
+export type OpenAiChatRequest = {
+  model: string
+  messages: unknown[]
+  stream: true
+  [key: string]: unknown
+}
+
+/**
+ * POST {baseURL}/chat/completions（stream: true）。
+ * 服务端的 OpenAI 增量在这里翻译成同一套 MessageStreamEvent，上层消费逻辑不区分协议。
+ */
+export async function* streamOpenAiChat(
+  provider: Provider,
+  apiKey: string,
+  body: OpenAiChatRequest,
+  signal: AbortSignal,
+  sessionId?: string
+): AsyncGenerator<MessageStreamEvent> {
+  const response = await request(`${provider.baseURL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      ...provider.headers,
+      // OpenCode Go 要求每个会话带稳定的 session 标识，缺失会被 400 拒绝
+      ...(sessionId ? { 'x-opencode-session': sessionId } : {}),
+    },
+    body: JSON.stringify(body),
+    signal,
+  })
+  const contentType = response.headers.get('Content-Type') ?? ''
+  if (!response.body || !contentType.includes('text/event-stream')) {
+    throw await readErrorResponse(response, 'protocol', '')
+  }
+  const state: OpenAiStreamState = createOpenAiStreamState(body.model)
+  for await (const { data } of readServerSentEvents(response.body, signal)) {
+    if (data === '[DONE]') {
+      yield* finishOpenAiStream(state, true)
+      return
+    }
+    let payload: unknown
+    try {
+      payload = JSON.parse(data)
+    } catch {
+      continue
+    }
+    // 流中的错误帧：形如 { error: { message } }，不带 choices
+    const message = readOpenAiErrorMessage(payload)
+    if (message && !hasChoices(payload)) {
+      throw new ApiError('stream', message)
+    }
+    yield* readOpenAiEvent(payload, state)
+    if (state.finished) {
+      return
+    }
+  }
+  // 没有收到 [DONE]：若已给出 finish_reason 视为正常结束，否则按断流处理。
+  if (state.stopReason === null) {
+    yield* finishOpenAiStream(state, false)
+    throw new ApiError('interrupted', '')
+  }
+  yield* finishOpenAiStream(state, true)
+}
+
+const hasChoices = (value: unknown): boolean =>
+  typeof value === 'object' && value !== null && 'choices' in value

@@ -25,6 +25,9 @@ declare const styles: {
   readonly "apiKeySaved": string;
   readonly "apiKeyInput": string;
   readonly "apiKeyMask": string;
+  readonly "provider": string;
+  readonly "providerSelect": string;
+  readonly "modelRow": string;
   readonly "divider": string;
   readonly "confirm": string;
   readonly "cellButton": string;

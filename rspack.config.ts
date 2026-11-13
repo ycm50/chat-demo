@@ -16,6 +16,13 @@ const cssLoader = {
   options: { targets },
 }
 
+/**
+ * 开发模式下服务商的同源代理前缀。
+ * opencode 与 OpenDesign 的鉴权失败响应不带 CORS 头，浏览器直连会把校验失败读成网络错误，
+ * 因此开发时统一走开发服务器转发；生产构建没有开发服务器，前缀为空串。
+ */
+const DEV_PROXY_PREFIX = '/provider'
+
 type ConfigOptions = {
   /** 公开 API 的地址，注入为 __API_ORIGIN__ */
   apiOrigin?: string
@@ -80,13 +87,46 @@ export const createConfig = ({
       scriptLoading: 'defer',
       meta: { 'application-version': version },
     }),
-    new rspack.DefinePlugin({ __API_ORIGIN__: JSON.stringify(apiOrigin) }),
+    new rspack.DefinePlugin({
+      __API_ORIGIN__: JSON.stringify(apiOrigin),
+      __DEV_PROXY_PREFIX__: JSON.stringify(dev ? DEV_PROXY_PREFIX : ''),
+    }),
     new rspack.CopyRspackPlugin({
       patterns: [{ from: path.resolve(root, 'LICENSE'), to: 'LICENSE', toType: 'file' }],
     }),
   ],
   performance: { hints: false },
-  devServer: { port: 8090, ...devServer },
+  devServer: {
+    port: 8090,
+    // 开发模式把服务商请求转发到真实地址，避免浏览器跨域限制。
+    // 每条代理只匹配自己的前缀：opencode-go 与 opencode-zen 的路径不同，不能共用一条改写规则。
+    // 路径原样保留：/provider/opencode-go/inference/go/openai/v1 → https://opencode.ai/...
+    ...(dev
+      ? {
+          proxy: [
+            {
+              context: [`${DEV_PROXY_PREFIX}/opencode-go`],
+              target: 'https://opencode.ai',
+              pathRewrite: { [`^${DEV_PROXY_PREFIX}/opencode-go`]: '' },
+              changeOrigin: true,
+            },
+            {
+              context: [`${DEV_PROXY_PREFIX}/opencode-zen`],
+              target: 'https://opencode.ai',
+              pathRewrite: { [`^${DEV_PROXY_PREFIX}/opencode-zen`]: '' },
+              changeOrigin: true,
+            },
+            {
+              context: [`${DEV_PROXY_PREFIX}/opendesign`],
+              target: 'https://amr-link.open-design.ai',
+              pathRewrite: { [`^${DEV_PROXY_PREFIX}/opendesign`]: '' },
+              changeOrigin: true,
+            },
+          ],
+        }
+      : {}),
+    ...devServer,
+  },
 })
 
 // eslint-disable-next-line import/no-default-export

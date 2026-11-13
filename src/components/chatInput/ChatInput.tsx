@@ -7,7 +7,12 @@ import {
   IconStopFill16,
   IconThinkOutline14,
 } from '../base/icons.js'
-import { setSearch, setThinking, useSettings } from '../../services/settings.js'
+import {
+  getDeepseekApiKey,
+  setSearch,
+  setThinking,
+  useSettings,
+} from '../../services/settings.js'
 import { useIsMobile } from '../../app/viewport.js'
 import { sendMessage, stopReply, useChatStore } from '../../services/chat/store.js'
 import {
@@ -23,7 +28,7 @@ import {
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import { IconButton } from '../base/IconButton.js'
 import { Tooltip } from '../base/Tooltip.js'
-import { ensureApiKey } from '../settings/settingsDialogState.js'
+import { ensureApiKey, requireDeepseekKey } from '../settings/settingsDialogState.js'
 import { DragMask, useFileDrop } from './DragMask.js'
 import { showToast } from '../base/toastState.js'
 import { ACCEPT, useUploads } from '../../services/attachments.js'
@@ -53,6 +58,13 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const importingHistory = useChatStore((state) => state.importingHistory)
   const isMobile = useIsMobile()
   const search = useSettings((state) => state.search)
+  const providerId = useSettings((state) => state.provider)
+  const currentApiKey = useSettings((state) => state.apiKeys[state.provider])
+  const deepseekKey = useSettings((state) => state.apiKeys.deepseek)
+  /** 附件与语音固定走 DeepSeek，文件选择与录音在缺少 DeepSeek Key 时禁用 */
+  const deepseekReady = !!deepseekKey
+  /** 联网搜索：DeepSeek 用服务端工具，其他服务商需要 DeepSeek Key 做预检 */
+  const searchReady = providerId === 'deepseek' ? !!currentApiKey : !!deepseekKey
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const togglesRef = useRef<HTMLDivElement>(null)
@@ -75,18 +87,19 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   }, [t])
 
   const acceptFiles = (files: File[]) => {
-    if (files.length === 0 || useChatStore.getState().importingHistory || !ensureApiKey()) {
+    if (files.length === 0 || useChatStore.getState().importingHistory || !requireDeepseekKey()) {
       return
     }
-    const error = addDraftFiles(sessionId, files, useSettings.getState().apiKey ?? '')
+    // 附件上传固定走 DeepSeek 的 Files API
+    const error = addDraftFiles(sessionId, files, getDeepseekApiKey())
     if (error) {
       showToast(error)
     }
   }
   const retryFile = useCallback(
     (id: string) => {
-      if (!useChatStore.getState().importingHistory && ensureApiKey()) {
-        retryDraftAttachment(sessionId, id, useSettings.getState().apiKey ?? '')
+      if (!useChatStore.getState().importingHistory && requireDeepseekKey()) {
+        retryDraftAttachment(sessionId, id, getDeepseekApiKey())
       }
     },
     [sessionId]
@@ -214,13 +227,22 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
               <span className={styles.toggleLabel}>{t('thinkingSwitch')}</span>
             </button>
           </Tooltip>
-          <Tooltip content={t('deactivatedSearchTooltip')}>
+          <Tooltip
+            content={t(
+              searchReady ? 'deactivatedSearchTooltip' : 'chatInputSearchNeedsDeepseekKey'
+            )}
+          >
             <button
               type="button"
-              className={clsx(styles.toggle, search && styles.selected)}
+              className={clsx(styles.toggle, search && searchReady && styles.selected)}
               aria-label={t('search')}
-              aria-pressed={search}
-              onClick={() => setSearch(!search)}
+              aria-pressed={search && searchReady}
+              disabled={!searchReady}
+              onClick={() => {
+                if (searchReady) {
+                  setSearch(!search)
+                }
+              }}
             >
               <IconGlobeLanguageOutline14 />
               <span className={styles.toggleLabel}>{t('search')}</span>
@@ -230,12 +252,12 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
         <div className={styles.right}>
           <VoiceButton
             status={voice.status}
-            disabled={!voice.available}
+            disabled={!voice.available || !deepseekReady}
             seconds={voice.seconds}
             onClick={() => {
               if (
                 voice.status !== 'idle' ||
-                (!useChatStore.getState().importingHistory && ensureApiKey())
+                (!useChatStore.getState().importingHistory && requireDeepseekKey())
               ) {
                 void voice.toggle()
               }
@@ -245,9 +267,9 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
             size="m"
             tone="primary"
             icon={<IconPaperclipOutline16 />}
-            tooltip={t('uploadFile')}
-            disabled={importingHistory}
-            onClick={() => ensureApiKey() && fileInputRef.current?.click()}
+            tooltip={t(deepseekReady ? 'uploadFile' : 'chatInputAttachmentNeedsDeepseekKey')}
+            disabled={importingHistory || !deepseekReady}
+            onClick={() => requireDeepseekKey() && fileInputRef.current?.click()}
           />
           <input
             ref={fileInputRef}

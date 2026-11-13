@@ -108,6 +108,10 @@ export const en = {
   apiKeyPlaceholder: 'Enter API Key',
   apiKeyVerifying: 'Verifying...',
   confirm: 'Confirm',
+  apiKeyCorsBlocked:
+    'The service is reachable, but its response lacks CORS headers, so the browser blocks it. Use the pnpm dev proxy locally, or put a reverse proxy in front of a static deployment.',
+  replyCorsBlocked:
+    'This service does not allow cross-origin access. Retry through the dev server or a reverse proxy.',
   apiKeyInvalid: 'Invalid API Key. Please check it and try again.',
   apiKeyVerificationFailed: 'Verification failed: {message}',
   historyImport: 'Import chat history',
@@ -120,7 +124,7 @@ export const en = {
   historyImportedOne: 'Imported 1 chat',
   historyImported: 'Imported {count} chats',
   historyImportFailed:
-    'Import failed. The file may be in an unsupported format or corrupted. Please export your chat history from DeepSeek and try importing again.',
+    'File import failed. The file format may be invalid, or the ZIP file may use an older chat export format. Please export your chat history from DeepSeek again and retry the import.',
   historyExportFailed: 'Export failed: {message}',
   exportAllLabel: 'Export all chats',
   historyExportDescription:
@@ -176,6 +180,18 @@ export const en = {
   ttsFailed: 'Failed to read aloud. Please try again later.',
   retry: 'Retry',
   latestReminderLanguage: 'English',
+  chatInputSearchNeedsDeepseekKey: 'Web search requires a DeepSeek key',
+  chatInputAttachmentNeedsDeepseekKey: 'Uploads require a DeepSeek key',
+  attachmentNotSentForProvider:
+    'These attachments cannot be sent through the current provider and were left out of this request: {names}',
+  settingsProvider: 'Chat provider',
+  settingsModel: 'Chat model',
+  settingsModelLoading: 'Loading models...',
+  apiKeyClear: 'Clear',
+  settingsDeepseekKeyRequired: 'The DeepSeek key is used for attachments, speech, and web search',
+  settingsProviderAttachmentHint:
+    'Attachments and speech use the DeepSeek key above: images and text files are inlined, while PDF and Word documents are not sent. Web search runs on DeepSeek first, then the digest is added to this provider request.',
+  chatInputProviderNoKey: 'No API key for the current provider',
   settingsLocaleZhCN: 'Simplified Chinese',
   settingsLocaleEnUS: 'English',
 } satisfies Record<keyof typeof zh, string>
